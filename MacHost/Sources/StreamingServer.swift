@@ -129,10 +129,13 @@ class StreamingServer {
         connectionReady = false
         clientSupportsFrameMetadata = false
         clientIsAvcOnly = false
-        waitingForSyncFrame = true
         inputBuffer.removeAll(keepingCapacity: true)
         connection = newConnection
-        droppedFrames = 0
+        frameQueue.async { [weak self] in
+            self?.waitingForSyncFrame = true
+            self?.droppedFrames = 0
+            self?.inFlightFrameSends = 0
+        }
 
         connection?.stateUpdateHandler = { [weak self] state in
             debugLog("Connection state: \(state)")
@@ -443,19 +446,21 @@ class StreamingServer {
     func sendFrame(_ data: Data, timestamp: UInt64, isKeyframe: Bool = false) {
         guard let connection = connection, !isStopped, connectionReady else { return }
 
-        // With short-GOP encoding, a fresh client must start on a keyframe —
-        // sending P-frames before the first IDR would feed garbage to its decoder.
-        if waitingForSyncFrame {
-            guard isKeyframe else {
-                droppedFrames += 1
-                return
-            }
-            waitingForSyncFrame = false
-            debugLog("First keyframe sent to new client")
-        }
+        frameQueue.async { [weak self, weak connection] in
+            guard let self = self,
+                  let connection = connection,
+                  self.connection === connection,
+                  !self.isStopped,
+                  self.connectionReady else { return }
 
-        frameQueue.async { [weak self] in
-            guard let self = self else { return }
+            if self.waitingForSyncFrame {
+                guard isKeyframe else {
+                    self.droppedFrames += 1
+                    return
+                }
+                self.waitingForSyncFrame = false
+                debugLog("First keyframe sent to new client")
+            }
 
             if self.inFlightFrameSends > 0 && !isKeyframe {
                 self.droppedFrames += 1
@@ -465,9 +470,11 @@ class StreamingServer {
             let packet = self.makeFramePacket(data, timestamp: timestamp, isKeyframe: isKeyframe)
             self.inFlightFrameSends += 1
 
-            connection.send(content: packet, completion: .contentProcessed { [weak self] error in
+            connection.send(content: packet, completion: .contentProcessed { [weak self, weak connection] error in
                 self?.frameQueue.async {
-                    guard let self = self else { return }
+                    guard let self = self,
+                          let connection = connection,
+                          self.connection === connection else { return }
                     self.inFlightFrameSends = max(0, self.inFlightFrameSends - 1)
                     if error != nil {
                         self.droppedFrames += 1

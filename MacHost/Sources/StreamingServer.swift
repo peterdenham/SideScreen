@@ -66,6 +66,7 @@ class StreamingServer {
     private var bytesSent: UInt64 = 0
     private var frameCount: UInt64 = 0
     private var droppedFrames: UInt64 = 0
+    private var inFlightFrameSends = 0
     private var lastStatsTime = DispatchTime.now()
     private var displayWidth = 1920
     private var displayHeight = 1080
@@ -128,10 +129,13 @@ class StreamingServer {
         connectionReady = false
         clientSupportsFrameMetadata = false
         clientIsAvcOnly = false
-        waitingForSyncFrame = true
         inputBuffer.removeAll(keepingCapacity: true)
         connection = newConnection
-        droppedFrames = 0
+        frameQueue.async { [weak self] in
+            self?.waitingForSyncFrame = true
+            self?.droppedFrames = 0
+            self?.inFlightFrameSends = 0
+        }
 
         connection?.stateUpdateHandler = { [weak self] state in
             debugLog("Connection state: \(state)")
@@ -442,31 +446,42 @@ class StreamingServer {
     func sendFrame(_ data: Data, timestamp: UInt64, isKeyframe: Bool = false) {
         guard let connection = connection, !isStopped, connectionReady else { return }
 
-        // With short-GOP encoding, a fresh client must start on a keyframe —
-        // sending P-frames before the first IDR would feed garbage to its decoder.
-        if waitingForSyncFrame {
-            guard isKeyframe else {
-                droppedFrames += 1
+        frameQueue.async { [weak self, weak connection] in
+            guard let self = self,
+                  let connection = connection,
+                  self.connection === connection,
+                  !self.isStopped,
+                  self.connectionReady else { return }
+
+            if self.waitingForSyncFrame {
+                guard isKeyframe else {
+                    self.droppedFrames += 1
+                    return
+                }
+                self.waitingForSyncFrame = false
+                debugLog("First keyframe sent to new client")
+            }
+
+            if self.inFlightFrameSends > 0 && !isKeyframe {
+                self.droppedFrames += 1
                 return
             }
-            waitingForSyncFrame = false
-            debugLog("First keyframe sent to new client")
-        }
-
-        // No frame-age dropping or backpressure — send everything immediately.
-        // The encode queue depth limit (2 pending) in ScreenCapture handles flow control.
-        frameQueue.async { [weak self] in
-            guard let self = self else { return }
 
             let packet = self.makeFramePacket(data, timestamp: timestamp, isKeyframe: isKeyframe)
+            self.inFlightFrameSends += 1
 
-            connection.send(content: packet, completion: .contentProcessed { error in
-                if error != nil {
-                    self.droppedFrames += 1
+            connection.send(content: packet, completion: .contentProcessed { [weak self, weak connection] error in
+                self?.frameQueue.async {
+                    guard let self = self,
+                          let connection = connection,
+                          self.connection === connection else { return }
+                    self.inFlightFrameSends = max(0, self.inFlightFrameSends - 1)
+                    if error != nil {
+                        self.droppedFrames += 1
+                    }
                 }
             })
 
-            // Track frame age at send time for pipeline profiling
             let sendAge = DispatchTime.now().uptimeNanoseconds - timestamp
             self.updateStats(bytes: data.count, frameAgeNs: sendAge)
         }

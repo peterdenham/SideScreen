@@ -103,13 +103,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         switch settings.connectionMode {
         case .usb:
-            settings.adbInstalled = StatusDetector.adbInstalled()
             let port = Int(settings.port)
             Task.detached { [weak self] in
+                let adbOK = StatusDetector.adbInstalled()
                 let devices = StatusDetector.usbDevices()
                 let reverseOK = StatusDetector.adbReverseConfigured(port: port)
                 await MainActor.run { [weak self] in
                     guard let self = self else { return }
+                    self.settings.adbInstalled = adbOK
                     self.settings.usbDeviceConnected = !devices.isEmpty
                     self.settings.adbReverseConfigured = reverseOK
                 }

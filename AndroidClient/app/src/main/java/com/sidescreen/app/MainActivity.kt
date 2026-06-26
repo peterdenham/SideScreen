@@ -46,7 +46,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
     private lateinit var prefs: PreferencesManager
     private var videoDecoder: VideoDecoder? = null
-    private var streamClient: StreamClient? = null
+    @Volatile private var streamClient: StreamClient? = null
     private var currentSurfaceHolder: SurfaceHolder? = null
     private var displayWidth = 0 // 0 = no config received yet
     private var displayHeight = 0 // 0 = no config received yet
@@ -829,26 +829,28 @@ class MainActivity : AppCompatActivity() {
      * Wire up all StreamClient callbacks. Used by both USB connect() and wireless connectWireless().
      */
     private fun setupStreamClientCallbacks() {
-        streamClient?.onFrameReceived = { frameData, frameSize, timestamp, isKeyframe ->
+        val client = streamClient ?: return
+        client.onFrameReceived = { frameData, frameSize, timestamp, isKeyframe ->
             val dec = videoDecoder
             if (dec != null) {
                 dec.decode(frameData, frameSize, timestamp, isKeyframe)
             } else {
                 mainDiag("FRAME DROPPED: videoDecoder is null!")
+                client.releaseBuffer(frameData)
             }
         }
 
         videoDecoder?.onFrameDecoded = { buffer ->
-            streamClient?.releaseBuffer(buffer)
+            client.releaseBuffer(buffer)
         }
 
-        streamClient?.onLatencyMeasured = { rttMs ->
+        client.onLatencyMeasured = { rttMs ->
             runOnUiThread {
                 binding.latencyText.text = String.format("%.1f ms", rttMs)
             }
         }
 
-        streamClient?.onConnectionStatus = { connected ->
+        client.onConnectionStatus = { connected ->
             runOnUiThread {
                 isConnected = connected
                 if (connected) {
@@ -905,7 +907,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        streamClient?.onDisplaySize = { width, height, rotation ->
+        client.onDisplaySize = { width, height, rotation ->
             mainDiag("onDisplaySize: ${width}x$height @ $rotation°")
             warnIfAvcOnlyWithoutNegotiation()
             displayWidth = width
@@ -933,7 +935,7 @@ class MainActivity : AppCompatActivity() {
             log("Display: ${width}x$height @ $rotation°")
         }
 
-        streamClient?.onStats = { fps, mbps ->
+        client.onStats = { fps, mbps ->
             runOnUiThread {
                 binding.fpsText.text = String.format("%.1f", fps)
                 binding.bitrateText.text = String.format("%.1f Mbps", mbps)

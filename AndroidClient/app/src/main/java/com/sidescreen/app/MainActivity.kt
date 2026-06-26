@@ -233,6 +233,18 @@ class MainActivity : AppCompatActivity() {
         log("🎮 Performance mode DISABLED")
     }
 
+    override fun onStart() {
+        super.onStart()
+        if (isConnected) {
+            enablePerformanceMode()
+        }
+    }
+
+    override fun onStop() {
+        disablePerformanceMode()
+        super.onStop()
+    }
+
     /**
      * Enable fullscreen immersive mode
      * Uses modern WindowInsets API on Android R+ for better system compatibility
